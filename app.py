@@ -47,12 +47,27 @@ def secret(name, default=""):
 
 @st.cache_resource
 def get_supabase() -> Client:
-    url = secret("SUPABASE_URL")
-    key = secret("SUPABASE_SERVICE_ROLE_KEY")
+    # Supabase expects the bare project URL, e.g.
+    # https://your-project.supabase.co
+    # Users sometimes paste /rest/v1 or another API path from the dashboard;
+    # normalize those suffixes so the client does not build an invalid URL.
+    url = str(secret("SUPABASE_URL")).strip().rstrip("/")
+    for suffix in ("/rest/v1", "/auth/v1", "/storage/v1", "/graphql/v1"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+            break
+
+    key = str(secret("SUPABASE_SECRET_KEY") or secret("SUPABASE_SERVICE_ROLE_KEY")).strip()
     if not url or not key:
         raise RuntimeError(
             "Supabase is not configured. Add SUPABASE_URL and "
-            "SUPABASE_SERVICE_ROLE_KEY in Streamlit Secrets."
+            "SUPABASE_SECRET_KEY (preferred) or SUPABASE_SERVICE_ROLE_KEY "
+            "in Streamlit Secrets."
+        )
+    if not url.startswith("https://") or ".supabase.co" not in url:
+        raise RuntimeError(
+            "SUPABASE_URL must be the bare project URL, such as "
+            "https://your-project.supabase.co"
         )
     return create_client(url, key)
 
