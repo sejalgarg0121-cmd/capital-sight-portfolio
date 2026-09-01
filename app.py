@@ -1,443 +1,605 @@
 
-import json
 import hmac
-from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
+from typing import Optional
 
 import pandas as pd
 import streamlit as st
+from supabase import create_client, Client
 
-# yfinance is intentionally imported only when prices are refreshed.
-# This keeps initial app startup light.
-DATA_FILE = Path("data/portfolio_data.json")
-N_PORTFOLIOS = 10
-
-
-# -----------------------------
-# App configuration
-# -----------------------------
 st.set_page_config(
-    page_title="Portfolio Hub",
+    page_title="Capital Sights | Portfolio Hub",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
+# -----------------------------
+# Styling
+# -----------------------------
 st.markdown("""
 <style>
-    .block-container {max-width: 1400px; padding-top: 1.4rem;}
+    .block-container {max-width: 1450px; padding-top: 1.2rem; padding-bottom: 3rem;}
     [data-testid="stMetric"] {
-        background: rgba(255,255,255,0.03);
-        border: 1px solid rgba(255,255,255,0.10);
-        border-radius: 12px;
-        padding: 14px;
-    }
-    .small-muted {color: #8b93a7; font-size: 0.82rem;}
-    .brand {font-size: 0.85rem; letter-spacing: .12em; color: #b7bdca;}
-    .title {font-size: 2.1rem; font-weight: 750; margin-bottom: 0.2rem;}
-    .card {
-        border: 1px solid rgba(255,255,255,0.10);
+        background: rgba(255,255,255,.025);
+        border: 1px solid rgba(255,255,255,.10);
         border-radius: 14px;
-        padding: 18px;
-        background: rgba(255,255,255,0.025);
+        padding: 15px;
     }
-    div[data-testid="stButton"] > button {border-radius: 9px;}
+    .brand {font-size:.78rem; letter-spacing:.16em; color:#9da5b5; font-weight:700;}
+    .hero {font-size:2.2rem; font-weight:800; margin:.1rem 0 .2rem;}
+    .muted {color:#8d95a5;}
+    .pill {display:inline-block; padding:4px 9px; border-radius:999px;
+           background:rgba(214,168,79,.12); color:#d6a84f; font-size:.78rem;}
+    div[data-testid="stButton"] > button {border-radius:9px;}
+    .stDataFrame {border-radius:12px;}
 </style>
 """, unsafe_allow_html=True)
 
-
 # -----------------------------
-# Data layer
+# Secrets / Supabase
 # -----------------------------
-def default_data():
-    portfolios = []
-    for i in range(1, N_PORTFOLIOS + 1):
-        portfolios.append({
-            "id": i,
-            "name": f"Portfolio {i:02d}",
-            "description": "",
-            "cash": 0.0,
-            "holdings": [],
-            "transactions": [],
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-        })
-    return {
-        "version": 1,
-        "last_saved": datetime.now().isoformat(timespec="seconds"),
-        "portfolios": portfolios,
-    }
-
-
-def ensure_data_file():
-    DATA_FILE.parent.mkdir(parents=True, exist_ok=True)
-    if not DATA_FILE.exists():
-        DATA_FILE.write_text(json.dumps(default_data(), indent=2), encoding="utf-8")
-
-
-def load_data():
-    ensure_data_file()
+def secret(name, default=""):
     try:
-        return json.loads(DATA_FILE.read_text(encoding="utf-8"))
-    except Exception:
-        backup = DATA_FILE.with_suffix(".broken.json")
-        try:
-            DATA_FILE.replace(backup)
-        except Exception:
-            pass
-        data = default_data()
-        save_data(data)
-        return data
-
-
-def save_data(data):
-    data["last_saved"] = datetime.now().isoformat(timespec="seconds")
-    tmp = DATA_FILE.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    tmp.replace(DATA_FILE)
-
-
-def get_portfolio(data, portfolio_id):
-    return next(p for p in data["portfolios"] if p["id"] == portfolio_id)
-
-
-def portfolio_options(data):
-    return {f'{p["name"]}  ·  #{p["id"]:02d}': p["id"] for p in data["portfolios"]}
-
-
-# -----------------------------
-# Auth
-# -----------------------------
-def get_secret(name, default=""):
-    try:
-        return str(st.secrets.get(name, default))
+        return st.secrets.get(name, default)
     except Exception:
         return default
 
+@st.cache_resource
+def get_supabase() -> Client:
+    url = secret("SUPABASE_URL")
+    key = secret("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError(
+            "Supabase is not configured. Add SUPABASE_URL and "
+            "SUPABASE_SERVICE_ROLE_KEY in Streamlit Secrets."
+        )
+    return create_client(url, key)
 
+def db():
+    return get_supabase()
+
+# -----------------------------
+# Admin authentication
+# -----------------------------
 def is_admin():
-    return bool(st.session_state.get("admin_logged_in", False))
+    return bool(st.session_state.get("admin_logged_in"))
 
-
-def login_box():
-    st.sidebar.markdown("### 🔐 Admin Login")
-    username = st.sidebar.text_input("Username", key="login_user")
-    password = st.sidebar.text_input("Password", type="password", key="login_pass")
-
-    if st.sidebar.button("Log in", use_container_width=True):
-        expected_user = get_secret("ADMIN_USERNAME", "admin")
-        expected_pass = get_secret("ADMIN_PASSWORD", "change-me")
-        if hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_pass):
-            st.session_state.admin_logged_in = True
-            st.rerun()
-        else:
-            st.sidebar.error("Invalid login.")
-
+def login_sidebar():
+    with st.sidebar:
+        st.markdown("### 🔐 Admin Login")
+        username = st.text_input("Username", key="admin_user")
+        password = st.text_input("Password", type="password", key="admin_pass")
+        if st.button("Log in", use_container_width=True):
+            eu = secret("ADMIN_USERNAME", "admin")
+            ep = secret("ADMIN_PASSWORD", "change-me")
+            if hmac.compare_digest(username, eu) and hmac.compare_digest(password, ep):
+                st.session_state.admin_logged_in = True
+                st.rerun()
+            else:
+                st.error("Invalid credentials.")
 
 # -----------------------------
-# Portfolio calculations
+# Database helpers
 # -----------------------------
-def holding_frame(portfolio):
-    rows = []
-    for h in portfolio.get("holdings", []):
-        qty = float(h.get("qty", 0))
-        avg = float(h.get("avg_buy", 0))
-        ltp = h.get("ltp")
-        ltp = float(ltp) if ltp not in (None, "", "nan") else None
-        invested = qty * avg
-        current = qty * ltp if ltp is not None else None
-        pnl = current - invested if current is not None else None
-        pnl_pct = (pnl / invested * 100) if pnl is not None and invested else None
+@st.cache_data(ttl=30, show_spinner=False)
+def load_portfolios():
+    rows = db().table("portfolios").select("*").order("portfolio_number").execute().data
+    return rows
 
-        rows.append({
-            "Stock": h.get("name") or h.get("ticker", ""),
-            "Ticker": h.get("ticker", ""),
-            "Qty": qty,
-            "Avg. Buy": avg,
-            "LTP": ltp,
-            "Invested": invested,
-            "Current Value": current,
-            "P&L": pnl,
-            "P&L %": pnl_pct,
-        })
-    return pd.DataFrame(rows)
+@st.cache_data(ttl=20, show_spinner=False)
+def load_holdings(portfolio_id):
+    return db().table("holdings").select("*").eq("portfolio_id", portfolio_id).order("ticker").execute().data
 
+@st.cache_data(ttl=20, show_spinner=False)
+def load_transactions(portfolio_id):
+    return (
+        db().table("transactions")
+        .select("*")
+        .eq("portfolio_id", portfolio_id)
+        .order("trade_date", desc=True)
+        .order("created_at", desc=True)
+        .execute().data
+    )
 
-def portfolio_metrics(portfolio):
-    df = holding_frame(portfolio)
-    invested = float(df["Invested"].sum()) if not df.empty else 0.0
-    known = df["Current Value"].notna() if not df.empty else pd.Series(dtype=bool)
-    current_known = float(df.loc[known, "Current Value"].sum()) if not df.empty else 0.0
-    unknown_count = int((~known).sum()) if not df.empty else 0
-    pnl = current_known - invested if unknown_count == 0 else None
-    pnl_pct = (pnl / invested * 100) if pnl is not None and invested else None
-    return invested, current_known, pnl, pnl_pct, unknown_count
+@st.cache_data(ttl=20, show_spinner=False)
+def load_theses(portfolio_id):
+    return (
+        db().table("theses")
+        .select("*")
+        .eq("portfolio_id", portfolio_id)
+        .order("ticker")
+        .execute().data
+    )
 
+@st.cache_data(ttl=20, show_spinner=False)
+def load_snapshots(portfolio_id):
+    return (
+        db().table("portfolio_snapshots")
+        .select("*")
+        .eq("portfolio_id", portfolio_id)
+        .order("snapshot_date")
+        .execute().data
+    )
+
+def clear_cache():
+    load_portfolios.clear()
+    load_holdings.clear()
+    load_transactions.clear()
+    load_theses.clear()
+    load_snapshots.clear()
+
+def current_portfolio(portfolios, number):
+    return next(p for p in portfolios if p["portfolio_number"] == number)
+
+def get_holding(holdings, ticker):
+    return next((h for h in holdings if h["ticker"] == ticker), None)
+
+def metrics_from_holdings(holdings):
+    invested = sum(float(h.get("quantity",0)) * float(h.get("avg_buy_price",0)) for h in holdings)
+    current = sum(
+        float(h.get("quantity",0)) * float(h["ltp"])
+        for h in holdings
+        if h.get("ltp") is not None
+    )
+    missing = sum(1 for h in holdings if h.get("ltp") is None)
+    pnl = current - invested if missing == 0 else None
+    ret = pnl / invested * 100 if pnl is not None and invested else None
+    return invested, current, pnl, ret, missing
 
 # -----------------------------
-# Price refresh (lazy)
+# Prices
 # -----------------------------
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_prices(tickers):
     if not tickers:
         return {}
     import yfinance as yf
-
-    result = {}
+    out = {}
     for ticker in tickers:
         try:
-            # fast_info is generally lighter than downloading a history table.
-            t = yf.Ticker(ticker)
-            price = t.fast_info.get("last_price")
+            fi = yf.Ticker(ticker).fast_info
+            price = fi.get("last_price")
             if price is not None:
-                result[ticker] = float(price)
+                out[ticker] = float(price)
         except Exception:
-            continue
-    return result
+            pass
+    return out
 
+def benchmark_symbol(value):
+    value = (value or "").strip().upper()
+    aliases = {
+        "NIFTY 50": "^NSEI",
+        "NIFTY50": "^NSEI",
+        "NIFTY": "^NSEI",
+        "SENSEX": "^BSESN",
+        "NIFTY BANK": "^NSEBANK",
+        "BANK NIFTY": "^NSEBANK",
+    }
+    return aliases.get(value, value)
 
-def refresh_prices(portfolio):
-    tickers = [h.get("ticker", "").strip() for h in portfolio.get("holdings", []) if h.get("ticker")]
-    if not tickers:
-        return 0
-    prices = fetch_prices(tuple(sorted(set(tickers))))
+@st.cache_data(ttl=900, show_spinner=False)
+def fetch_benchmark_history(symbol, start_date):
+    import yfinance as yf
+    try:
+        end = pd.Timestamp.today().normalize() + pd.Timedelta(days=1)
+        hist = yf.Ticker(symbol).history(
+            start=pd.Timestamp(start_date),
+            end=end,
+            auto_adjust=True,
+        )
+        if hist.empty:
+            return pd.DataFrame()
+        out = hist[["Close"]].copy()
+        out.index = pd.to_datetime(out.index).tz_localize(None)
+        return out
+    except Exception:
+        return pd.DataFrame()
+
+def refresh_prices_and_snapshot(portfolio, holdings):
+    tickers = sorted({h["ticker"] for h in holdings if h.get("ticker")})
+    prices = fetch_prices(tuple(tickers))
     updated = 0
-    for h in portfolio.get("holdings", []):
-        ticker = h.get("ticker", "").strip()
-        if ticker in prices:
-            h["ltp"] = prices[ticker]
-            h["price_updated"] = datetime.now().isoformat(timespec="seconds")
+    for h in holdings:
+        if h["ticker"] in prices:
+            db().table("holdings").update({
+                "ltp": prices[h["ticker"]],
+                "price_updated_at": datetime.utcnow().isoformat()
+            }).eq("id", h["id"]).execute()
+            h["ltp"] = prices[h["ticker"]]
             updated += 1
-    portfolio["updated_at"] = datetime.now().isoformat(timespec="seconds")
+
+    invested, current, pnl, ret, missing = metrics_from_holdings(holdings)
+    if missing == 0:
+        benchmark = benchmark_symbol(portfolio.get("benchmark_ticker"))
+        benchmark_price = None
+        if benchmark:
+            bp = fetch_prices((benchmark,))
+            benchmark_price = bp.get(benchmark)
+
+        db().table("portfolio_snapshots").upsert({
+            "portfolio_id": portfolio["id"],
+            "snapshot_date": str(date.today()),
+            "portfolio_value": current,
+            "invested_value": invested,
+            "return_pct": ret,
+            "benchmark_value": benchmark_price,
+        }, on_conflict="portfolio_id,snapshot_date").execute()
     return updated
 
+# -----------------------------
+# Initial DB check
+# -----------------------------
+try:
+    portfolios = load_portfolios()
+except Exception as e:
+    st.error("Database connection is not configured yet.")
+    st.code(str(e))
+    st.stop()
+
+if len(portfolios) < 10:
+    st.error("Your Supabase database needs 10 portfolio records. Run the supplied schema SQL.")
+    st.stop()
 
 # -----------------------------
-# UI
+# Sidebar
 # -----------------------------
-data = load_data()
-
 with st.sidebar:
-    st.markdown("## 📊 Portfolio Hub")
+    st.markdown("## 📊 Capital Sights")
     st.caption("10 portfolios · unlimited holdings")
     st.divider()
 
-    selected_label = st.selectbox(
-        "Portfolio",
-        list(portfolio_options(data).keys()),
-        key="portfolio_selector",
-    )
-    selected_id = portfolio_options(data)[selected_label]
+    labels = {
+        f'Portfolio {p["portfolio_number"]:02d} · {p["name"]}': p["portfolio_number"]
+        for p in portfolios
+    }
+    selected_label = st.selectbox("Portfolio", list(labels.keys()))
+    selected_number = labels[selected_label]
 
     page = st.radio(
         "Navigate",
-        ["Portfolio", "Buy / Sell", "Performance", "Settings"],
+        ["Dashboard", "Portfolio", "Buy / Sell", "Transactions", "Performance", "Research", "Settings"],
         index=0,
         label_visibility="collapsed",
     )
 
     st.divider()
-
     if is_admin():
         st.success("Logged in as admin")
         if st.button("Log out", use_container_width=True):
             st.session_state.admin_logged_in = False
             st.rerun()
     else:
-        login_box()
+        login_sidebar()
 
     if st.button("↻ Refresh Prices", use_container_width=True, disabled=not is_admin()):
-        p = get_portfolio(data, selected_id)
+        p = current_portfolio(portfolios, selected_number)
+        hs = load_holdings(p["id"])
         with st.spinner("Updating prices…"):
-            n = refresh_prices(p)
-        save_data(data)
+            n = refresh_prices_and_snapshot(p, hs)
+        clear_cache()
         st.success(f"Updated {n} holding(s).")
         st.rerun()
 
-    st.caption("Public mode: view only. Admin mode: edit portfolios and transactions.")
+    st.caption("Public mode: view only. Admin mode: edit.")
 
-portfolio = get_portfolio(data, selected_id)
-
-# Header
-st.markdown('<div class="brand">PORTFOLIO HUB</div>', unsafe_allow_html=True)
-st.markdown(f'<div class="title">{portfolio["name"]}</div>', unsafe_allow_html=True)
-if portfolio.get("description"):
-    st.caption(portfolio["description"])
-
+portfolio = current_portfolio(portfolios, selected_number)
+holdings = load_holdings(portfolio["id"])
+transactions = load_transactions(portfolio["id"])
 
 # -----------------------------
-# Portfolio page
+# Dashboard
 # -----------------------------
-if page == "Portfolio":
-    invested, current, pnl, pnl_pct, unknown = portfolio_metrics(portfolio)
+if page == "Dashboard":
+    st.markdown('<div class="brand">CAPITAL SIGHTS</div>', unsafe_allow_html=True)
+    st.markdown('<div class="hero">Portfolio Dashboard</div>', unsafe_allow_html=True)
+    st.caption("A single view across all 10 research portfolios.")
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current Portfolio Value", f"₹{current:,.0f}" if unknown == 0 else "—")
-    c2.metric("Capital Invested", f"₹{invested:,.0f}")
-    c3.metric("Total P&L", f"₹{pnl:,.0f}" if pnl is not None else "—")
-    c4.metric("Return", f"{pnl_pct:+.2f}%" if pnl_pct is not None else "—")
+    total_invested = total_current = 0
+    dashboard_rows = []
+    for p in portfolios:
+        hs = load_holdings(p["id"])
+        inv, cur, pnl, ret, missing = metrics_from_holdings(hs)
+        total_invested += inv
+        total_current += cur
+        dashboard_rows.append({
+            "Portfolio": p["name"],
+            "ID": f'{p["portfolio_number"]:02d}',
+            "Invested": inv,
+            "Current Value": cur if missing == 0 else None,
+            "P&L": pnl,
+            "Return": ret,
+            "Holdings": len(hs),
+        })
 
-    if unknown:
-        st.info(f"{unknown} holding(s) do not have a current price. Use “Refresh Prices” after logging in.")
+    total_pnl = total_current - total_invested
+    total_ret = total_pnl / total_invested * 100 if total_invested else None
+
+    a,b,c,d = st.columns(4)
+    a.metric("Total Invested", f"₹{total_invested:,.0f}")
+    b.metric("Current Value", f"₹{total_current:,.0f}")
+    c.metric("Total P&L", f"₹{total_pnl:,.0f}")
+    d.metric("Return", f"{total_ret:+.2f}%" if total_ret is not None else "—")
+
+    st.subheader("All Portfolios")
+    dd = pd.DataFrame(dashboard_rows)
+    for col in ["Invested","Current Value","P&L"]:
+        dd[col] = dd[col].map(lambda x: f"₹{x:,.0f}" if pd.notna(x) else "—")
+    dd["Return"] = dd["Return"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "—")
+    st.dataframe(dd, use_container_width=True, hide_index=True)
+
+# -----------------------------
+# Portfolio
+# -----------------------------
+elif page == "Portfolio":
+    st.markdown('<div class="brand">CAPITAL SIGHTS</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
+    if portfolio.get("description"):
+        st.caption(portfolio["description"])
+
+    invested, current, pnl, ret, missing = metrics_from_holdings(holdings)
+    a,b,c,d = st.columns(4)
+    a.metric("Current Value", f"₹{current:,.0f}" if missing == 0 else "—")
+    b.metric("Capital Invested", f"₹{invested:,.0f}")
+    c.metric("Total P&L", f"₹{pnl:,.0f}" if pnl is not None else "—")
+    d.metric("Return", f"{ret:+.2f}%" if ret is not None else "—")
 
     st.subheader("Holdings")
-    df = holding_frame(portfolio)
-
-    if df.empty:
+    if not holdings:
         st.info("No holdings yet. Log in as admin to add stocks.")
     else:
-        display = df.copy()
-        for col in ["Avg. Buy", "LTP", "Invested", "Current Value", "P&L"]:
-            display[col] = display[col].map(lambda x: f"₹{x:,.2f}" if pd.notna(x) else "—")
-        display["Qty"] = display["Qty"].map(lambda x: f"{x:,.0f}")
-        display["P&L %"] = display["P&L %"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "—")
-        st.dataframe(display, use_container_width=True, hide_index=True)
+        rows=[]
+        for h in holdings:
+            inv=float(h["quantity"])*float(h["avg_buy_price"])
+            cur=float(h["quantity"])*float(h["ltp"]) if h.get("ltp") is not None else None
+            hpnl=cur-inv if cur is not None else None
+            hpct=hpnl/inv*100 if hpnl is not None and inv else None
+            rows.append({
+                "Stock": h.get("company_name") or h["ticker"],
+                "Ticker": h["ticker"],
+                "Sector": h.get("sector") or "Unclassified",
+                "Qty": h["quantity"],
+                "Avg. Buy": inv / float(h["quantity"]) if h["quantity"] else 0,
+                "LTP": h.get("ltp"),
+                "Invested": inv,
+                "Current Value": cur,
+                "P&L": hpnl,
+                "P&L %": hpct,
+            })
+        df=pd.DataFrame(rows)
+        view=df.copy()
+        for col in ["Avg. Buy","LTP","Invested","Current Value","P&L"]:
+            view[col]=view[col].map(lambda x:f"₹{x:,.2f}" if pd.notna(x) else "—")
+        view["P&L %"]=view["P&L %"].map(lambda x:f"{x:+.2f}%" if pd.notna(x) else "—")
+        st.dataframe(view,use_container_width=True,hide_index=True)
 
-        st.subheader("Allocation")
-        alloc = df.groupby("Stock", as_index=True)["Invested"].sum()
-        if alloc.sum() > 0:
-            st.bar_chart(alloc)
+        st.subheader("Sector Allocation")
+        sec=df.groupby("Sector")["Invested"].sum().sort_values(ascending=False)
+        if sec.sum():
+            st.bar_chart(sec)
 
     st.divider()
-    st.caption(
-        "Educational / research-tracking portfolio. Values are simulated and are not investment advice."
-    )
-
+    st.caption("Educational / research-tracking portfolio. Not investment advice.")
 
 # -----------------------------
-# Buy / Sell page
+# Buy / Sell
 # -----------------------------
 elif page == "Buy / Sell":
-    st.subheader("Transactions")
-
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
+    st.subheader("Add transaction")
     if not is_admin():
         st.info("Log in as admin to add or edit transactions.")
     else:
-        with st.form("transaction_form", clear_on_submit=True):
-            a, b, c, d = st.columns(4)
-            ticker = a.text_input("Ticker", placeholder="RELIANCE.NS").upper().strip()
-            name = b.text_input("Company", placeholder="Reliance Industries")
-            action = c.selectbox("Action", ["BUY", "SELL"])
-            qty = d.number_input("Quantity", min_value=0.0, step=1.0)
-
-            e, f, g = st.columns(3)
-            price = e.number_input("Price", min_value=0.0, step=0.05)
-            trade_date = f.date_input("Date")
-            note = g.text_input("Note", placeholder="Optional")
-
-            submitted = st.form_submit_button("Save transaction", use_container_width=True)
+        with st.form("trade_form", clear_on_submit=True):
+            a,b,c,d=st.columns(4)
+            ticker=a.text_input("Ticker",placeholder="RELIANCE.NS").upper().strip()
+            company=b.text_input("Company")
+            action=c.selectbox("Action",["BUY","SELL"])
+            qty=d.number_input("Quantity",min_value=0.0,step=1.0)
+            e,f,g,h=st.columns(4)
+            price=e.number_input("Price",min_value=0.0,step=0.05)
+            trade_date=f.date_input("Date",value=date.today())
+            sector=g.text_input("Sector",placeholder="Financials")
+            note=h.text_input("Note")
+            submitted=st.form_submit_button("Save transaction",use_container_width=True)
 
         if submitted:
-            if not ticker or qty <= 0 or price <= 0:
+            if not ticker or qty<=0 or price<=0:
                 st.error("Ticker, quantity and price are required.")
             else:
-                existing = next(
-                    (h for h in portfolio["holdings"] if h.get("ticker") == ticker),
-                    None,
-                )
-
-                if action == "BUY":
+                existing=get_holding(holdings,ticker)
+                if action=="BUY":
                     if existing:
-                        old_qty = float(existing["qty"])
-                        old_avg = float(existing["avg_buy"])
-                        new_qty = old_qty + qty
-                        existing["avg_buy"] = ((old_qty * old_avg) + (qty * price)) / new_qty
-                        existing["qty"] = new_qty
-                        existing["ltp"] = price
-                        if name:
-                            existing["name"] = name
+                        old_qty=float(existing["quantity"])
+                        old_avg=float(existing["avg_buy_price"])
+                        new_qty=old_qty+qty
+                        new_avg=((old_qty*old_avg)+(qty*price))/new_qty
+                        db().table("holdings").update({
+                            "quantity":new_qty,
+                            "avg_buy_price":new_avg,
+                            "ltp":price,
+                            "company_name":company or existing.get("company_name") or ticker,
+                            "sector":sector or existing.get("sector"),
+                        }).eq("id",existing["id"]).execute()
                     else:
-                        portfolio["holdings"].append({
-                            "ticker": ticker,
-                            "name": name or ticker,
-                            "qty": qty,
-                            "avg_buy": price,
-                            "ltp": price,
-                            "price_updated": datetime.now().isoformat(timespec="seconds"),
-                        })
+                        db().table("holdings").insert({
+                            "portfolio_id":portfolio["id"],
+                            "ticker":ticker,
+                            "company_name":company or ticker,
+                            "sector":sector or "Unclassified",
+                            "quantity":qty,
+                            "avg_buy_price":price,
+                            "ltp":price,
+                        }).execute()
                 else:
-                    if not existing or float(existing["qty"]) < qty:
+                    if not existing or float(existing["quantity"])<qty:
                         st.error("Not enough quantity to sell.")
                         st.stop()
+                    new_qty=float(existing["quantity"])-qty
+                    if new_qty<=0:
+                        db().table("holdings").delete().eq("id",existing["id"]).execute()
+                    else:
+                        db().table("holdings").update({"quantity":new_qty}).eq("id",existing["id"]).execute()
 
-                    existing["qty"] = float(existing["qty"]) - qty
-                    if existing["qty"] <= 0:
-                        portfolio["holdings"].remove(existing)
+                db().table("transactions").insert({
+                    "portfolio_id":portfolio["id"],
+                    "trade_date":str(trade_date),
+                    "ticker":ticker,
+                    "company_name":company or ticker,
+                    "action":action,
+                    "quantity":qty,
+                    "price":price,
+                    "sector":sector or (existing.get("sector") if existing else "Unclassified"),
+                    "note":note,
+                }).execute()
 
-                portfolio["transactions"].append({
-                    "date": str(trade_date),
-                    "ticker": ticker,
-                    "name": name or ticker,
-                    "action": action,
-                    "qty": qty,
-                    "price": price,
-                    "note": note,
-                })
-                portfolio["updated_at"] = datetime.now().isoformat(timespec="seconds")
-                save_data(data)
-                st.success(f"{action} transaction saved.")
+                clear_cache()
+                st.success(f"{action} saved.")
                 st.rerun()
 
-    tx = portfolio.get("transactions", [])
-    if tx:
-        tx_df = pd.DataFrame(tx).iloc[::-1]
-        st.dataframe(tx_df, use_container_width=True, hide_index=True)
+# -----------------------------
+# Transactions
+# -----------------------------
+elif page == "Transactions":
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
+    st.subheader("Transaction History")
+    if not transactions:
+        st.info("No transactions yet.")
     else:
-        st.caption("No transactions yet.")
-
+        tx=pd.DataFrame(transactions)
+        cols=["trade_date","ticker","company_name","action","quantity","price","sector","note"]
+        tx=tx[[c for c in cols if c in tx.columns]].rename(columns={
+            "trade_date":"Date","ticker":"Ticker","company_name":"Company",
+            "action":"Action","quantity":"Qty","price":"Price","sector":"Sector","note":"Note"
+        })
+        tx["Price"]=tx["Price"].map(lambda x:f"₹{float(x):,.2f}")
+        st.dataframe(tx,use_container_width=True,hide_index=True)
 
 # -----------------------------
-# Performance page
+# Performance
 # -----------------------------
 elif page == "Performance":
-    st.subheader("Performance")
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
+    st.subheader("Historical Performance")
 
-    invested, current, pnl, pnl_pct, unknown = portfolio_metrics(portfolio)
-
-    if unknown:
-        st.info("Refresh prices to calculate current portfolio performance.")
+    snapshots=load_snapshots(portfolio["id"])
+    if not snapshots:
+        st.info("No daily snapshots yet. Refresh prices after the market data is available; snapshots will build over time.")
     else:
-        left, right = st.columns(2)
-        left.metric("Invested", f"₹{invested:,.0f}")
-        right.metric("Current Value", f"₹{current:,.0f}")
+        s=pd.DataFrame(snapshots)
+        s["snapshot_date"]=pd.to_datetime(s["snapshot_date"])
+        s=s.sort_values("snapshot_date").set_index("snapshot_date")
 
-        if pnl is not None:
-            st.metric("P&L", f"₹{pnl:,.0f}", f"{pnl_pct:+.2f}%")
+        chart = s[["portfolio_value"]].rename(columns={"portfolio_value": portfolio["name"]}).copy()
 
-        df = holding_frame(portfolio)
-        if not df.empty:
-            perf = df[["Stock", "Invested", "Current Value", "P&L", "P&L %"]].copy()
-            st.dataframe(perf, use_container_width=True, hide_index=True)
+        benchmark_name = portfolio.get("benchmark_ticker") or "NIFTY 50"
+        benchmark = benchmark_symbol(benchmark_name)
+        first_date = s.index.min().date()
+        bh = fetch_benchmark_history(benchmark, first_date)
+        if not bh.empty:
+            # Normalize benchmark to 100 at the first available date so it can
+            # be compared directly with portfolio percentage performance.
+            b = bh["Close"].resample("D").last().dropna()
+            if len(b):
+                b_norm = b / float(b.iloc[0]) * 100
+                p_norm = chart.iloc[:, 0] / float(chart.iloc[0, 0]) * 100 if float(chart.iloc[0, 0]) else chart.iloc[:, 0]
+                comparison = pd.DataFrame({
+                    portfolio["name"]: p_norm,
+                    f"{benchmark_name} (100=base)": b_norm,
+                }).sort_index().ffill()
+                st.line_chart(comparison)
+            else:
+                st.line_chart(chart)
+        else:
+            st.line_chart(chart)
 
-    st.caption(
-        "This version calculates position-level and portfolio-level returns from transactions. "
-        "Historical NAV charts can be added once daily snapshots are stored."
-    )
+        latest=s.iloc[-1]
+        a,b,c=st.columns(3)
+        a.metric("Latest Value",f"₹{latest['portfolio_value']:,.0f}")
+        a2 = float(s.iloc[0]["portfolio_value"]) if float(s.iloc[0]["portfolio_value"]) else 0
+        portfolio_period = ((float(latest["portfolio_value"])/a2)-1)*100 if a2 else None
+        b.metric("Portfolio Since First Snapshot",f"{portfolio_period:+.2f}%" if portfolio_period is not None else "—")
 
+        bench_series = bh["Close"].dropna() if 'bh' in locals() and not bh.empty else pd.Series(dtype=float)
+        if len(bench_series) >= 2:
+            bench_return = (float(bench_series.iloc[-1])/float(bench_series.iloc[0])-1)*100
+            c.metric(f"{benchmark_name} Return",f"{bench_return:+.2f}%")
+        else:
+            c.metric(f"{benchmark_name} Return","—")
+
+        st.caption(
+            f"Benchmark: {benchmark_name}. The comparison is normalized to 100 at the start "
+            "of the available period. Historical portfolio points accumulate when prices are refreshed."
+        )
 
 # -----------------------------
-# Settings page
+# Research
+# -----------------------------
+elif page == "Research":
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
+    st.subheader("Investment Thesis")
+
+    theses=load_theses(portfolio["id"])
+    thesis_map={t["ticker"]:t for t in theses}
+
+    tickers=[h["ticker"] for h in holdings]
+    if not tickers:
+        st.info("Add a holding first.")
+    else:
+        selected=st.selectbox("Stock",tickers)
+        t=thesis_map.get(selected,{})
+        if is_admin():
+            with st.form("thesis_form"):
+                why=st.text_area("Why we own it",value=t.get("why_we_own",""))
+                bull=st.text_area("Bull case",value=t.get("bull_case",""))
+                bear=st.text_area("Bear case",value=t.get("bear_case",""))
+                risks=st.text_area("Key risks / things to monitor",value=t.get("key_risks",""))
+                valuation=st.text_input("Valuation / target",value=t.get("valuation",""))
+                save=st.form_submit_button("Save thesis",use_container_width=True)
+            if save:
+                payload={
+                    "portfolio_id":portfolio["id"],"ticker":selected,
+                    "why_we_own":why,"bull_case":bull,"bear_case":bear,
+                    "key_risks":risks,"valuation":valuation,
+                    "updated_at":datetime.utcnow().isoformat()
+                }
+                db().table("theses").upsert(payload,on_conflict="portfolio_id,ticker").execute()
+                clear_cache()
+                st.success("Thesis saved.")
+                st.rerun()
+        else:
+            st.markdown(f"### {selected}")
+            st.write("**Why we own it**")
+            st.write(t.get("why_we_own") or "—")
+            st.write("**Bull case**")
+            st.write(t.get("bull_case") or "—")
+            st.write("**Bear case**")
+            st.write(t.get("bear_case") or "—")
+            st.write("**Key risks**")
+            st.write(t.get("key_risks") or "—")
+            st.write("**Valuation / target**")
+            st.write(t.get("valuation") or "—")
+
+# -----------------------------
+# Settings
 # -----------------------------
 else:
+    st.markdown(f'<div class="hero">{portfolio["name"]}</div>', unsafe_allow_html=True)
     st.subheader("Portfolio Settings")
-
     if not is_admin():
-        st.info("Log in as admin to edit settings.")
+        st.info("Log in as admin to edit portfolio settings.")
     else:
-        with st.form("settings_form"):
-            new_name = st.text_input("Portfolio name", value=portfolio["name"])
-            new_desc = st.text_area("Description", value=portfolio.get("description", ""))
-            save_settings = st.form_submit_button("Save changes", use_container_width=True)
-
-        if save_settings:
-            portfolio["name"] = new_name.strip() or f"Portfolio {portfolio['id']:02d}"
-            portfolio["description"] = new_desc.strip()
-            portfolio["updated_at"] = datetime.now().isoformat(timespec="seconds")
-            save_data(data)
-            st.success("Saved.")
+        with st.form("portfolio_settings"):
+            name=st.text_input("Portfolio name",value=portfolio["name"])
+            desc=st.text_area("Description",value=portfolio.get("description") or "")
+            benchmark=st.text_input("Benchmark ticker / name",value=portfolio.get("benchmark_ticker") or "NIFTY 50")
+            save=st.form_submit_button("Save changes",use_container_width=True)
+        if save:
+            db().table("portfolios").update({
+                "name":name.strip() or portfolio["name"],
+                "description":desc.strip(),
+                "benchmark_ticker":benchmark.strip()
+            }).eq("id",portfolio["id"]).execute()
+            clear_cache()
+            st.success("Portfolio updated.")
             st.rerun()
-
-        st.divider()
-        st.caption(f"Portfolio ID: {portfolio['id']:02d}")
-        st.caption(f"Last updated: {portfolio.get('updated_at', '—')}")
-        st.caption(f"Data file: {DATA_FILE}")
