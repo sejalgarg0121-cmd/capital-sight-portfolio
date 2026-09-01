@@ -1,0 +1,106 @@
+{
+  "version": 1,
+  "last_saved": "",
+  "portfolios": [
+    {
+      "id": 1,
+      "name": "Portfolio 01",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 2,
+      "name": "Portfolio 02",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 3,
+      "name": "Portfolio 03",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 4,
+      "name": "Portfolio 04",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 5,
+      "name": "Portfolio 05",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 6,
+      "name": "Portfolio 06",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 7,
+      "name": "Portfolio 07",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 8,
+      "name": "Portfolio 08",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 9,
+      "name": "Portfolio 09",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    },
+    {
+      "id": 10,
+      "name": "Portfolio 10",
+      "description": "",
+      "cash": 0.0,
+      "holdings": [],
+      "transactions": [],
+      "created_at": "",
+      "updated_at": ""
+    }
+  ]
+}
